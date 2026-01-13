@@ -35,6 +35,7 @@ class ConnectionSessionEnergySimulator:
         self._session_active = False
         self._last_evse_state = None
         self._is_locked = False
+        self._previous_cycles_energy = 0.0  # Track energy from completed charge cycles
     
     def update(self):
         """Update the sensor - mimics the native_value property."""
@@ -51,6 +52,7 @@ class ConnectionSessionEnergySimulator:
                 print(f"🔌 Connection session ENDED. Total energy: {self._accumulated_energy} kWh")
                 self._session_active = False
                 self._last_charge_energy = None
+                self._previous_cycles_energy = 0.0
                 # Reset after session ends
                 self._accumulated_energy = 0.0
             self._is_locked = current_locked
@@ -63,22 +65,31 @@ class ConnectionSessionEnergySimulator:
                 self._session_active = True
                 self._accumulated_energy = 0.0
                 self._last_charge_energy = None
+                self._previous_cycles_energy = 0.0
             
             # Accumulate energy if chargeStatus exists
             if 'chargeStatus' in status and 'chargeEnergyTotal' in status['chargeStatus']:
                 current_charge_energy = status['chargeStatus']['chargeEnergyTotal']
                 
                 if current_charge_energy is not None:
-                    # Sum all readings within the session
-                    # If this is a new reading (different from last), add it to the total
+                    # chargeEnergyTotal is a cumulative counter within a charge cycle
+                    # When a new charge cycle starts (schedule triggers), the counter resets
+                    # We need to track energy across all cycles within the connection session
+                    
                     if self._last_charge_energy is None:
-                        # First reading in this session
-                        self._accumulated_energy += current_charge_energy
-                        print(f"  ⚡ Initial charge energy: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh")
-                    elif current_charge_energy != self._last_charge_energy:
-                        # New reading - add it to accumulated total
-                        self._accumulated_energy += current_charge_energy
-                        print(f"  ⚡ Added energy reading: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh")
+                        # First reading in this connection session
+                        self._accumulated_energy = current_charge_energy
+                        print(f"  ⚡ First reading: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh")
+                    elif current_charge_energy < self._last_charge_energy:
+                        # Counter reset - new charge cycle started (e.g., scheduled charging)
+                        # Save energy from previous cycle(s) and track new cycle
+                        self._previous_cycles_energy += self._last_charge_energy
+                        self._accumulated_energy = self._previous_cycles_energy + current_charge_energy
+                        print(f"  🔄 Charge cycle RESET. Previous cycle max: {self._last_charge_energy} kWh, new cycle: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh")
+                    else:
+                        # Normal progression - update to current cumulative value
+                        self._accumulated_energy = self._previous_cycles_energy + current_charge_energy
+                        print(f"  ⚡ Charging: {current_charge_energy} kWh (current cycle), total: {self._accumulated_energy} kWh")
                     
                     self._last_charge_energy = current_charge_energy
         
@@ -117,16 +128,33 @@ def main():
     print("AndersenEV Connection Session Energy Sensor - Test Suite")
     print("="*60)
     
-    # Test Scenario 1: Your example - multiple readings in one session
+    # Test Scenario 1: Scheduled charging with multiple cycles
     run_test_scenario(
-        "Multiple Readings in One Session",
+        "Realistic: Scheduled Charging with Multiple Cycles",
         [
             ("Cable connected (evseState=2)", 2, None, False),
-            ("First energy reading", 3, 3.1, False),
-            ("Second energy reading", 3, 4.5, False),
-            ("Third energy reading", 3, 6.3, False),
-            ("Fourth energy reading", 3, 2.0, False),
-            ("Fifth energy reading", 3, 14.0, False),
+            ("Charging cycle 1 starts", 3, 0.0, False),
+            ("Cycle 1: 3.1 kWh charged", 3, 3.1, False),
+            ("Cycle 1: 4.5 kWh charged (cumulative)", 3, 4.5, False),
+            ("Cycle 1: 6.3 kWh charged (cumulative)", 3, 6.3, False),
+            ("Cycle 1 stops (schedule), cable still connected", 2, 6.3, False),
+            ("Charging cycle 2 starts (COUNTER RESETS)", 3, 0.0, False),
+            ("Cycle 2: 2.0 kWh charged", 3, 2.0, False),
+            ("Cycle 2: 14.0 kWh charged (cumulative)", 3, 14.0, False),
+            ("Cable disconnected", 1, None, False),
+        ]
+    )
+    
+    # Test Scenario 2: Original example (if readings are cumulative)
+    run_test_scenario(
+        "If Readings Are Cumulative Within One Cycle",
+        [
+            ("Cable connected (evseState=2)", 2, None, False),
+            ("Start charging - 3.1 kWh cumulative", 3, 3.1, False),
+            ("Charging - 4.5 kWh cumulative", 3, 4.5, False),
+            ("Charging - 6.3 kWh cumulative", 3, 6.3, False),
+            ("Counter reset (new cycle) - 2.0 kWh", 3, 2.0, False),
+            ("Charging - 14 kWh cumulative", 3, 14.0, False),
             ("Cable disconnected", 1, None, False),
         ]
     )

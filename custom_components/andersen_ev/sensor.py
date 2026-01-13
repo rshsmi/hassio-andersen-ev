@@ -556,6 +556,7 @@ class AndersenEvConnectionSessionEnergySensor(CoordinatorEntity, RestoreEntity, 
         self._session_active = False
         self._last_evse_state = None
         self._is_locked = False
+        self._previous_cycles_energy = 0.0  # Track energy from completed charge cycles
         
         self._update_model_from_device_status()
 
@@ -619,6 +620,7 @@ class AndersenEvConnectionSessionEnergySensor(CoordinatorEntity, RestoreEntity, 
                     _LOGGER.info(f"Connection session ended for {self._device.friendly_name}. Total energy: {self._accumulated_energy} kWh")
                     self._session_active = False
                     self._last_charge_energy = None
+                    self._previous_cycles_energy = 0.0
                     # Reset after session ends
                     self._accumulated_energy = 0.0
                 self._is_locked = current_locked
@@ -631,22 +633,30 @@ class AndersenEvConnectionSessionEnergySensor(CoordinatorEntity, RestoreEntity, 
                     self._session_active = True
                     self._accumulated_energy = 0.0
                     self._last_charge_energy = None
+                    self._previous_cycles_energy = 0.0
                 
                 # Accumulate energy if chargeStatus exists
                 if 'chargeStatus' in status and 'chargeEnergyTotal' in status['chargeStatus']:
                     current_charge_energy = status['chargeStatus']['chargeEnergyTotal']
                     
                     if current_charge_energy is not None:
-                        # Sum all readings within the session
-                        # If this is a new reading (different from last), add it to the total
+                        # chargeEnergyTotal is a cumulative counter within a charge cycle
+                        # When a new charge cycle starts (schedule triggers), the counter resets
+                        # We need to track energy across all cycles within the connection session
+                        
                         if self._last_charge_energy is None:
-                            # First reading in this session
-                            self._accumulated_energy += current_charge_energy
-                            _LOGGER.debug(f"Initial charge energy: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh for {self._device.friendly_name}")
-                        elif current_charge_energy != self._last_charge_energy:
-                            # New reading - add it to accumulated total
-                            self._accumulated_energy += current_charge_energy
-                            _LOGGER.debug(f"Added energy reading: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh for {self._device.friendly_name}")
+                            # First reading in this connection session
+                            self._accumulated_energy = current_charge_energy
+                            _LOGGER.debug(f"First reading: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh for {self._device.friendly_name}")
+                        elif current_charge_energy < self._last_charge_energy:
+                            # Counter reset - new charge cycle started (e.g., scheduled charging)
+                            # Save energy from previous cycle(s) and track new cycle
+                            self._previous_cycles_energy += self._last_charge_energy
+                            self._accumulated_energy = self._previous_cycles_energy + current_charge_energy
+                            _LOGGER.info(f"Charge cycle reset. Previous cycle max: {self._last_charge_energy} kWh, new cycle: {current_charge_energy} kWh, total: {self._accumulated_energy} kWh for {self._device.friendly_name}")
+                        else:
+                            # Normal progression - update to current cumulative value
+                            self._accumulated_energy = self._previous_cycles_energy + current_charge_energy
                         
                         self._last_charge_energy = current_charge_energy
             
